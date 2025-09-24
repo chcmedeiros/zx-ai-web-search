@@ -1,7 +1,6 @@
 import { Page } from 'playwright';
 import { Tool } from '@langchain/core/tools';
 import { z } from 'zod';
-import { TrademarkResult } from '../schemas/trademarkSchema.js';
 
 const ScraperInputSchema = z
   .object({

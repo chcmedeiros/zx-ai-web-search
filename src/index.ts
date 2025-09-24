@@ -3,7 +3,7 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
 import * as dotenv from 'dotenv';
-import { SimpleWIPOAgent } from './agents/simpleAgent.js';
+import { WIPOSearchAgent } from './agents/wipoSearchAgent.js';
 import { TrademarkSearchParams, TrademarkSearchParamsSchema } from './schemas/trademarkSchema.js';
 
 dotenv.config();
@@ -49,7 +49,7 @@ program
       console.log(`  Limit: ${chalk.white(searchParams.limit)}\n`);
 
       // Initialize and run agent
-      const agent = new SimpleWIPOAgent();
+      const agent = new WIPOSearchAgent();
       const results = await agent.search(searchParams);
 
       if (results) {
@@ -97,7 +97,7 @@ program
     try {
       console.log(chalk.blue('🧪 Running test search...'));
 
-      const agent = new SimpleWIPOAgent();
+      const agent = new WIPOSearchAgent();
       const testParams: TrademarkSearchParams = {
         query: 'Nike',
         searchType: 'brand',

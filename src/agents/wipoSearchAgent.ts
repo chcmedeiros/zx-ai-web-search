@@ -8,6 +8,7 @@ import {
   SearchResults
 } from '../schemas/trademarkSchema.js';
 import { WIPOScraperTool } from '../tools/scraperTool.js';
+import { GeminiFormatter } from '../services/geminiFormatter.js';
 
 const GraphState = Annotation.Root({
   messages: Annotation<BaseMessage[]>({
@@ -41,230 +42,230 @@ type GraphStateType = typeof GraphState.State;
 export class WIPOSearchAgent {
   private graph: any;
   private scraper: WIPOScraperTool;
+  private formatter: GeminiFormatter;
   private checkpointer: MemorySaver;
 
   constructor() {
     this.scraper = new WIPOScraperTool();
+    this.formatter = new GeminiFormatter();
     this.checkpointer = new MemorySaver();
     this.graph = this.buildGraph();
   }
 
   private buildGraph() {
-    const graph = new StateGraph(GraphState);
+    const workflow = new StateGraph(GraphState);
 
-    graph.addNode('initialize', async (state: GraphStateType) => {
-      console.log(chalk.blue('🚀 Initializing browser session...'));
+    // Add nodes to the graph
+    workflow.addNode("initialize", this.initializeBrowser.bind(this));
+    workflow.addNode("authenticate", this.handleAuthentication.bind(this));
+    workflow.addNode("search", this.submitSearch.bind(this));
+    workflow.addNode("extractResults", this.extractResults.bind(this));
+    workflow.addNode("formatResults", this.formatResults.bind(this));
 
-      const browser = await chromium.launch({
-        headless: process.env.HEADLESS !== 'false',
-        args: ['--disable-blink-features=AutomationControlled']
-      });
+    // Set entry point
+    workflow.setEntryPoint("initialize");
 
-      const context = await browser.newContext({
-        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        viewport: { width: 1920, height: 1080 }
-      });
+    // Define the graph flow
+    workflow.addEdge("initialize", "authenticate");
+    workflow.addEdge("authenticate", "search");
+    workflow.addEdge("search", "extractResults");
+    workflow.addEdge("extractResults", "formatResults");
 
-      const page = await context.newPage();
+    return workflow.compile({ checkpointer: this.checkpointer });
+  }
 
-      return {
-        browser,
-        context,
-        page,
-        agentState: {
-          ...state.agentState,
-          currentStep: 'authenticate' as const,
-          browserSession: {
-            sessionId: Math.random().toString(36).substring(7),
-            isAuthenticated: false
-          }
+  private async initializeBrowser(state: GraphStateType): Promise<Partial<GraphStateType>> {
+    console.log(chalk.blue('🚀 Initializing browser session...'));
+
+    const browser = await chromium.launch({
+      headless: process.env.HEADLESS !== 'false',
+      args: ['--disable-blink-features=AutomationControlled']
+    });
+
+    const context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      viewport: { width: 1920, height: 1080 }
+    });
+
+    const page = await context.newPage();
+
+    return {
+      browser,
+      context,
+      page,
+      agentState: {
+        ...state.agentState,
+        browserSession: {
+          sessionId: Math.random().toString(36).substring(7),
+          isAuthenticated: false
         }
-      };
+      }
+    };
+  }
+
+  private async handleAuthentication(state: GraphStateType): Promise<Partial<GraphStateType>> {
+    console.log(chalk.yellow('🔐 Handling authentication...'));
+
+    if (!state.page) throw new Error('Page not initialized');
+
+    const result = await this.scraper.callAction({
+      action: 'handleCaptcha',
+      page: state.page
     });
 
-    graph.addNode('authenticate', async (state: GraphStateType) => {
-      console.log(chalk.yellow('🔐 Handling authentication...'));
+    const response = JSON.parse(result);
 
-      if (!state.page) throw new Error('Page not initialized');
+    if (!response.success) {
+      throw new Error(response.message || 'Authentication failed');
+    }
 
-      const result = await this.scraper.callAction({
-        action: 'handleCaptcha',
-        page: state.page
-      });
-
-      const response = JSON.parse(result);
-
-      if (response.success) {
-        return {
-          agentState: {
-            ...state.agentState,
-            currentStep: 'search' as const,
-            browserSession: {
-              ...state.agentState.browserSession!,
-              isAuthenticated: true
-            }
-          },
-          messages: [new AIMessage('Authentication successful')]
-        };
-      }
-
-      return {
-        agentState: {
-          ...state.agentState,
-          currentStep: 'error' as const,
-          error: {
-            message: response.message || 'Authentication failed',
-            retry: true
-          }
+    return {
+      agentState: {
+        ...state.agentState,
+        browserSession: {
+          ...state.agentState.browserSession!,
+          isAuthenticated: true
         }
-      };
+      },
+      messages: [new AIMessage('Authentication successful')]
+    };
+  }
+
+  private async submitSearch(state: GraphStateType): Promise<Partial<GraphStateType>> {
+    console.log(chalk.green(`🔍 Searching for: ${state.agentState.searchParams.query}`));
+
+    if (!state.page) throw new Error('Page not initialized');
+
+    const result = await this.scraper.callAction({
+      action: 'searchTrademarks',
+      page: state.page,
+      query: state.agentState.searchParams.query
     });
 
-    graph.addNode('search', async (state: GraphStateType) => {
-      console.log(chalk.green(`🔍 Searching for: ${state.agentState.searchParams.query}`));
+    const response = JSON.parse(result);
 
-      if (!state.page) throw new Error('Page not initialized');
+    if (!response.success) {
+      throw new Error(response.message || 'Search failed');
+    }
 
-      const result = await this.scraper.callAction({
-        action: 'searchTrademarks',
-        page: state.page,
-        query: state.agentState.searchParams.query
-      });
+    return {
+      messages: [new AIMessage(`Search submitted for: ${state.agentState.searchParams.query}`)]
+    };
+  }
 
-      const response = JSON.parse(result);
+  private async extractResults(state: GraphStateType): Promise<Partial<GraphStateType>> {
+    console.log(chalk.cyan('📊 Extracting search results...'));
 
-      if (response.success) {
-        return {
-          agentState: {
-            ...state.agentState,
-            currentStep: 'extractResults' as const
-          },
-          messages: [new AIMessage(`Search submitted for: ${state.agentState.searchParams.query}`)]
-        };
-      }
+    if (!state.page) throw new Error('Page not initialized');
 
-      return {
-        agentState: {
-          ...state.agentState,
-          currentStep: 'error' as const,
-          error: {
-            message: response.message || 'Search failed',
-            retry: true
-          }
-        }
-      };
+    const result = await this.scraper.callAction({
+      action: 'extractResults',
+      page: state.page
     });
 
-    graph.addNode('extractResults', async (state: GraphStateType) => {
-      console.log(chalk.cyan('📊 Extracting search results...'));
+    const response = JSON.parse(result);
 
-      if (!state.page) throw new Error('Page not initialized');
+    if (!response.success || !response.results) {
+      throw new Error(response.message || 'Failed to extract results');
+    }
 
-      const result = await this.scraper.callAction({
-        action: 'extractResults',
-        page: state.page
-      });
+    return {
+      agentState: {
+        ...state.agentState,
+        rawResults: response.results
+      },
+      messages: [new AIMessage(`Extracted ${response.results.length} raw results`)]
+    };
+  }
 
-      const response = JSON.parse(result);
+  private async formatResults(state: GraphStateType): Promise<Partial<GraphStateType>> {
+    console.log(chalk.magenta('🤖 Formatting results with AI...'));
 
-      if (response.success && response.results) {
-        const searchResults: SearchResults = {
-          query: state.agentState.searchParams.query,
-          totalResults: response.results.length,
-          page: 1,
-          results: response.results,
-          searchTime: Date.now() - (state.agentState.browserSession?.sessionId.length || 0) * 1000,
-          timestamp: new Date()
-        };
+    if (!state.agentState.rawResults) {
+      throw new Error('No raw results to format');
+    }
 
-        return {
-          agentState: {
-            ...state.agentState,
-            currentStep: 'complete' as const,
-            searchResults
-          },
-          messages: [new AIMessage(`Found ${response.results.length} results`)]
-        };
-      }
+    // Format results with Gemini AI
+    const formattedResults = await this.formatter.formatResults(state.agentState.rawResults);
 
-      return {
-        agentState: {
-          ...state.agentState,
-          currentStep: 'error' as const,
-          error: {
-            message: response.message || 'Failed to extract results',
-            retry: false
-          }
-        }
-      };
-    });
+    const searchResults: SearchResults = {
+      query: state.agentState.searchParams.query,
+      totalResults: formattedResults.length,
+      page: 1,
+      results: formattedResults.slice(0, state.agentState.searchParams.limit),
+      searchTime: Date.now(),
+      timestamp: new Date()
+    };
 
-    graph.addNode('complete', async (state: GraphStateType) => {
-      console.log(chalk.green('✅ Search completed successfully!'));
+    console.log(chalk.green('✅ Search completed successfully!'));
 
-      if (state.browser) {
-        await state.browser.close();
-      }
+    // Clean up browser
+    if (state.browser) {
+      await state.browser.close();
+    }
 
-      return {
-        messages: [new AIMessage('Search completed successfully')]
-      };
-    });
-
-    graph.addNode('error', async (state: GraphStateType) => {
-      console.log(chalk.red(`❌ Error: ${state.agentState.error?.message}`));
-
-      if (state.browser) {
-        await state.browser.close();
-      }
-
-      if (state.agentState.error?.retry && state.agentState.retryCount < 3) {
-        return {
-          agentState: {
-            ...state.agentState,
-            currentStep: 'initialize' as const,
-            retryCount: state.agentState.retryCount + 1
-          }
-        };
-      }
-
-      return {};
-    });
-
-    // Simple linear flow for now
-    graph.addEdge('initialize', 'authenticate');
-    graph.addEdge('authenticate', 'search');
-    graph.addEdge('search', 'extractResults');
-    graph.addEdge('extractResults', 'complete');
-
-    return graph.compile({
-      checkpointer: this.checkpointer
-    });
+    return {
+      agentState: {
+        ...state.agentState,
+        searchResults
+      },
+      messages: [new AIMessage(`Formatted and returned ${searchResults.results.length} results`)]
+    };
   }
 
   async search(params: TrademarkSearchParams): Promise<SearchResults | null> {
-    const initialState = {
-      messages: [new HumanMessage(`Search for trademark: ${params.query}`)],
-      agentState: {
-        searchParams: params,
-        currentStep: 'initialize' as const,
-        retryCount: 0
+    try {
+      const initialState = {
+        messages: [new HumanMessage(`Search for trademark: ${params.query}`)],
+        agentState: {
+          searchParams: params,
+          currentStep: 'initialize' as const,
+          retryCount: 0
+        }
+      };
+
+      // Enhanced configuration for LangSmith tracing
+      const config = {
+        configurable: {
+          thread_id: `search_${Date.now()}`,
+          run_name: `WIPO Trademark Search: ${params.query}`
+        },
+        tags: [
+          'trademark-search',
+          'wipo',
+          'langgraph-workflow',
+          `query:${params.query}`,
+          `type:${params.searchType}`,
+          'web-scraping',
+          'browser-automation'
+        ],
+        metadata: {
+          query: params.query,
+          searchType: params.searchType,
+          limit: params.limit,
+          agent: 'WIPOSearchAgent',
+          workflow: 'trademark_search',
+          timestamp: new Date().toISOString(),
+          environment: process.env.NODE_ENV || 'development',
+          version: '1.0.0'
+        }
+      };
+
+      console.log(chalk.blue(`🎯 Starting LangGraph workflow for: ${params.query}`));
+
+      const finalState = await this.graph.invoke(initialState, config);
+
+      if (finalState?.agentState?.searchResults) {
+        console.log(chalk.green(`🎉 LangGraph workflow completed successfully`));
+        return finalState.agentState.searchResults;
       }
-    };
 
-    const config = {
-      configurable: {
-        thread_id: `search_${Date.now()}`
-      }
-    };
+      console.log(chalk.red('❌ Search failed: No results found'));
+      return null;
 
-    const finalState = await this.graph.invoke(initialState, config);
-
-    if (finalState.agentState.searchResults) {
-      return finalState.agentState.searchResults;
+    } catch (error) {
+      console.error(chalk.red('❌ LangGraph workflow failed:'), error instanceof Error ? error.message : 'Unknown error');
+      return null;
     }
-
-    console.log(chalk.red('Search failed:', finalState.agentState.error?.message));
-    return null;
   }
 }

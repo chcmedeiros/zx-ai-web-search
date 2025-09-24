@@ -60,10 +60,11 @@ export const AgentStateSchema = z.object({
     'authenticate',
     'search',
     'extractResults',
-    'parseData',
+    'formatResults',
     'complete',
     'error'
   ]),
+  rawResults: z.array(z.any()).optional(),
   error: z.object({
     message: z.string(),
     code: z.string().optional(),
